@@ -1,0 +1,13 @@
+.env
+*.db
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+*.log
+
+# Standalone SMS callback experiments; SafetyPing uses backend/main.py.
+sms.py
+wsgi.py

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SafetyPing</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div>
+        <p class="eyebrow">Worker safety</p>
+        <h1>SafetyPing</h1>
+      </div>
+      <nav>
+        <a href="#overview">Overview</a>
+        <a href="#workers">Workers</a>
+        <a href="#incidents">Incidents</a>
+        <a href="#ussd">USSD demo</a>
+      </nav>
+    </aside>
+
+    <main>
+      <section id="overview" class="topbar">
+        <div>
+          <p class="eyebrow">Supervisor console</p>
+          <h2>Missed check-ins, incident reports, and daily briefings in one place.</h2>
+        </div>
+        <button id="scanBtn" type="button">Scan missed check-ins</button>
+      </section>
+
+      <section class="metrics" aria-label="Safety metrics">
+        <article>
+          <span id="checkedInCount">0</span>
+          <p>Checked in</p>
+        </article>
+        <article>
+          <span id="missedCount">0</span>
+          <p>Missed check-ins</p>
+        </article>
+        <article>
+          <span id="openIncidentCount">0</span>
+          <p>Open incidents</p>
+        </article>
+        <article>
+          <span id="alertCount">0</span>
+          <p>Supervisor alerts</p>
+        </article>
+      </section>
+
+      <section class="grid">
+        <div id="workers" class="panel">
+          <div class="panel-header">
+            <h3>Shift Roster</h3>
+            <button id="checkInFirst" type="button">Check in first worker</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Site</th>
+                  <th>Shift</th>
+                  <th>Status</th>
+                  <th>Last check-in</th>
+                </tr>
+              </thead>
+              <tbody id="workerRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Alert Queue</h3>
+          </div>
+          <div id="alertList" class="list"></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="incidentForm" class="panel form-panel">
+          <h3>Log Incident</h3>
+          <label>
+            Worker
+            <select id="incidentWorker" required></select>
+          </label>
+          <label>
+            Category
+            <select id="incidentCategory">
+              <option>Injury</option>
+              <option>Near miss</option>
+              <option>Unsafe equipment</option>
+              <option>Harassment</option>
+              <option>Other</option>
+            </select>
+          </label>
+          <label>
+            Severity
+            <select id="incidentSeverity">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+          <label>
+            Description
+            <textarea id="incidentDescription" required>Scaffold guard rail is loose near level two.</textarea>
+          </label>
+          <button type="submit">Submit incident</button>
+        </form>
+
+        <div id="incidents" class="panel">
+          <div class="panel-header">
+            <h3>Incident Reports</h3>
+          </div>
+          <div id="incidentList" class="list"></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Daily Briefings</h3>
+          </div>
+          <div id="briefingList" class="briefings"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Africa's Talking</h3>
+          </div>
+          <div id="integrationStatus" class="list"></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="ussd" class="panel form-panel">
+          <h3>USSD Demo</h3>
+          <label>
+            Worker phone
+            <select id="ussdPhone"></select>
+          </label>
+          <label>
+            USSD text
+            <input id="ussdText" placeholder="Example: 2*3*2*Loose ladder" />
+          </label>
+          <button type="submit">Send USSD request</button>
+          <pre id="ussdOutput">Dial menu starts with empty text.</pre>
+        </form>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h3>Inbound SMS</h3>
+          </div>
+          <div id="inboundSmsList" class="list"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
