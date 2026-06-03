@@ -20,6 +20,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from backend.ussd import build_ussd_response
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "safetyping.db"
@@ -75,7 +77,7 @@ class Settings(BaseModel):
     )
     at_messaging_url: str | None = os.getenv("AT_MESSAGING_URL")
     sms_sender_id: str | None = getenv_any("AFRICASTALKING_SENDER_ID", "SMS_SENDER_ID")
-    sms_shortcode: str | None = getenv_any("AFRICASTALKING_SHORTCODE", "SMS_SHORTCODE", default="79064")
+    sms_shortcode: str | None = getenv_any("AFRICASTALKING_SHORTCODE", "SMS_SHORTCODE", default="70896")
     sms_keyword: str | None = os.getenv("AFRICASTALKING_KEYWORD")
     sms_auto_send: bool = os.getenv("SAFETYPING_SMS_AUTO_SEND", "true").lower() == "true"
     sms_dry_run: bool = os.getenv("SAFETYPING_SMS_DRY_RUN", "false").lower() == "true"
@@ -665,47 +667,19 @@ def ussd(
     if not worker:
         return "END You are not registered for SafetyPing. Please contact your site supervisor."
 
-    parts = [part for part in text.split("*") if part]
-    if not parts:
-        return (
-            "CON SafetyPing\n"
-            "1. Check in\n"
-            "2. Report incident\n"
-            "3. Daily briefing\n"
-            "4. Check out"
-        )
-
-    if parts[0] == "1":
-        record_checkin(CheckInCreate(worker_phone=phoneNumber, action="check_in"))
-        return f"END Thanks {worker['name']}. Your check-in has been recorded."
-
-    if parts[0] == "4":
-        record_checkin(CheckInCreate(worker_phone=phoneNumber, action="check_out"))
-        return f"END Thanks {worker['name']}. Your check-out has been recorded."
-
-    if parts[0] == "3":
-        return f"END {BRIEFINGS.get(worker['language'], BRIEFINGS['en'])}"
-
-    if parts[0] == "2" and len(parts) == 1:
-        return "CON Incident type\n1. Injury\n2. Near miss\n3. Unsafe equipment\n4. Harassment\n5. Other"
-
-    if parts[0] == "2" and len(parts) == 2:
-        return "CON Severity\n1. Low\n2. Medium\n3. High\n4. Critical"
-
-    if parts[0] == "2" and len(parts) == 3:
-        return "CON Briefly describe what happened"
-
-    if parts[0] == "2" and len(parts) >= 4:
-        categories = {"1": "Injury", "2": "Near miss", "3": "Unsafe equipment", "4": "Harassment", "5": "Other"}
-        severities = {"1": "low", "2": "medium", "3": "high", "4": "critical"}
-        create_incident(
+    return build_ussd_response(
+        text=text,
+        worker=worker,
+        briefings=BRIEFINGS,
+        record_checkin=lambda action: record_checkin(
+            CheckInCreate(worker_phone=phoneNumber, action=action)
+        ),
+        create_incident=lambda category, severity, description: create_incident(
             IncidentCreate(
                 worker_phone=phoneNumber,
-                category=categories.get(parts[1], "Other"),
-                severity=severities.get(parts[2], "medium"),
-                description=" ".join(parts[3:])[:240],
+                category=category,
+                severity=severity,
+                description=description,
             )
-        )
-        return "END Incident received. Your supervisor has been alerted."
-
-    return "END Invalid option. Please try again."
+        ),
+    )
