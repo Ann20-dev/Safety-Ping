@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import urllib.error
@@ -14,9 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -108,6 +109,44 @@ logging.basicConfig(
 logger = logging.getLogger("safetyping.sms")
 
 
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict[str, Any]) -> None:
+        data = json.dumps(message, default=str)
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(data)
+            except Exception:
+                self.disconnect(connection)
+
+
+manager = ConnectionManager()
+
+
+def serialize_payload(payload: Any) -> str:
+    try:
+        return json.dumps(payload, default=str)
+    except Exception:
+        return json.dumps({"payload": str(payload)})
+
+
+def schedule_broadcast(message: dict[str, Any]) -> None:
+    try:
+        asyncio.create_task(manager.broadcast(message))
+    except RuntimeError:
+        logger.debug("No running event loop available for broadcast")
+
+
 def now_iso() -> str:
     return datetime.now(EAT).replace(microsecond=0).isoformat()
 
@@ -171,6 +210,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 raw_payload TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                phone_number TEXT,
+                payload_json TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         existing_columns = {
@@ -191,8 +241,15 @@ def init_db() -> None:
                     ("+254700111001", "Amina Otieno", "Westlands Tower", "sw", "+254722900001", "08:00", "17:00", "expected"),
                     ("+254700111002", "Brian Mwangi", "Mlolongo Bypass", "en", "+254722900001", "07:30", "16:30", "expected"),
                     ("+254700111003", "Kevin Barasa", "Kilimani Estate", "sheng", "+254733800002", "08:00", "17:00", "expected"),
+                    ("+254711731098", "Connectim User", "Sandbox Site", "en", "+254722900001", "08:00", "17:00", "expected"),
                 ],
             )
+        else:
+            if not row("SELECT 1 FROM workers WHERE phone = ?", ("+254711731098",)):
+                conn.execute(
+                    "INSERT INTO workers (phone, name, site, language, supervisor_phone, shift_start, shift_end, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("+254711731098", "Connectim User", "Sandbox Site", "en", "+254722900001", "08:00", "17:00", "expected"),
+                )
 
 
 def rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -204,6 +261,94 @@ def row(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
     with connect() as conn:
         found = conn.execute(query, params).fetchone()
         return dict(found) if found else None
+
+
+def event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except Exception:
+        payload = {"raw_payload": row["payload_json"]}
+    return {
+        "id": row["id"],
+        "event_type": row["event_type"],
+        "source": row["source"],
+        "actor": row["actor"],
+        "phone_number": row["phone_number"],
+        "payload": payload,
+        "status": row["status"],
+        "created_at": row["created_at"],
+    }
+
+
+def log_event(
+    event_type: str,
+    source: str,
+    actor: str,
+    phone_number: str | None,
+    payload: Any = None,
+    status: str = "success",
+) -> dict[str, Any]:
+    payload_json = serialize_payload(payload or {})
+    created_at = now_iso()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO activity_logs
+            (event_type, source, actor, phone_number, payload_json, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_type, source, actor or "system", phone_number or "", payload_json, status, created_at),
+        )
+        event_id = cursor.lastrowid
+    event = {
+        "id": event_id,
+        "event_type": event_type,
+        "source": source,
+        "actor": actor or "system",
+        "phone_number": phone_number or "",
+        "payload": payload or {},
+        "status": status,
+        "created_at": created_at,
+    }
+    schedule_broadcast({"type": "event", "event": event, "metrics": get_dashboard_metrics()})
+    return event
+
+
+def get_dashboard_metrics() -> dict[str, int]:
+    with connect() as conn:
+        metrics = {}
+        now = now_iso()
+        metrics["sms_sent"] = conn.execute(
+            "SELECT COUNT(1) FROM activity_logs WHERE event_type = 'sms_sent' AND date(created_at) = date('now','localtime')",
+        ).fetchone()[0]
+        metrics["sms_received"] = conn.execute(
+            "SELECT COUNT(1) FROM activity_logs WHERE event_type = 'sms_received' AND date(created_at) = date('now','localtime')",
+        ).fetchone()[0]
+        metrics["incidents"] = conn.execute(
+            "SELECT COUNT(1) FROM activity_logs WHERE event_type = 'incident_created' AND date(created_at) = date('now','localtime')",
+        ).fetchone()[0]
+        metrics["check_ins"] = conn.execute(
+            "SELECT COUNT(1) FROM activity_logs WHERE event_type = 'worker_check_in' AND date(created_at) = date('now','localtime')",
+        ).fetchone()[0]
+        metrics["check_outs"] = conn.execute(
+            "SELECT COUNT(1) FROM activity_logs WHERE event_type = 'worker_check_out' AND date(created_at) = date('now','localtime')",
+        ).fetchone()[0]
+        metrics["active_workers"] = conn.execute(
+            "SELECT COUNT(1) FROM workers WHERE status = 'checked_in'",
+        ).fetchone()[0]
+        metrics["missed_workers"] = conn.execute(
+            "SELECT COUNT(1) FROM workers WHERE status = 'missed'",
+        ).fetchone()[0]
+        return metrics
+
+
+def recent_activity(limit: int = 50) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows_data = conn.execute(
+            "SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [event_to_dict(row) for row in rows_data]
 
 
 class WorkerCreate(BaseModel):
@@ -232,6 +377,13 @@ class IncidentStatus(BaseModel):
     status: Literal["Open", "Reviewing", "Resolved"]
 
 
+class IncidentUpdate(BaseModel):
+    category: str | None = None
+    description: str | None = None
+    severity: Literal["low", "medium", "high", "critical"] | None = None
+    status: Literal["Open", "Reviewing", "Resolved"] | None = None
+
+
 class SmsSendRequest(BaseModel):
     to: list[str] = Field(min_length=1)
     message: str = Field(min_length=1, max_length=640)
@@ -254,10 +406,28 @@ def post_form(url: str, data: dict[str, Any]) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             body = response.read().decode("utf-8")
-            return {"status_code": response.status, "body": json.loads(body) if body else {}}
+            result = {"status_code": response.status, "body": json.loads(body) if body else {}}
+            log_event(
+                "africastalking_api_response",
+                "africastalking",
+                "system",
+                "",
+                {"url": url, "data": data, "response": result},
+                "success" if 200 <= result["status_code"] < 300 else "failed",
+            )
+            return result
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8")
-        return {"status_code": exc.code, "body": body}
+        result = {"status_code": exc.code, "body": body}
+        log_event(
+            "africastalking_api_response",
+            "africastalking",
+            "system",
+            "",
+            {"url": url, "data": data, "response": result},
+            "failed",
+        )
+        return result
 
 
 def get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -266,23 +436,59 @@ def get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             body = response.read().decode("utf-8")
-            return {"status_code": response.status, "body": json.loads(body) if body else {}}
+            result = {"status_code": response.status, "body": json.loads(body) if body else {}}
+            log_event(
+                "africastalking_api_response",
+                "africastalking",
+                "system",
+                "",
+                {"url": url, "params": params, "response": result},
+                "success" if 200 <= result["status_code"] < 300 else "failed",
+            )
+            return result
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8")
-        return {"status_code": exc.code, "body": body}
+        result = {"status_code": exc.code, "body": body}
+        log_event(
+            "africastalking_api_response",
+            "africastalking",
+            "system",
+            "",
+            {"url": url, "params": params, "response": result},
+            "failed",
+        )
+        return result
 
 
 def send_sms(to: list[str], message: str, mode: Literal["bulk", "premium"] = "bulk") -> dict[str, Any]:
     if settings.sms_dry_run:
+        response = {"status_code": 200, "body": {"dryRun": True, "to": to, "message": message}}
+        log_event(
+            "sms_sent",
+            "sms",
+            "system",
+            ",".join(to),
+            {"to": to, "message": message, "mode": mode, "response": response},
+            "dry_run",
+        )
         logger.info("DRY RUN - would send SMS to %s: %s", ",".join(to), message)
-        return {"status_code": 200, "body": {"dryRun": True, "to": to, "message": message}}
+        return response
     if not settings.sms_auto_send:
+        response = {"status_code": 202, "body": {"skipped": True, "reason": "auto_send_disabled", "to": to}}
+        log_event(
+            "sms_sent",
+            "sms",
+            "system",
+            ",".join(to),
+            {"to": to, "message": message, "mode": mode, "response": response},
+            "skipped",
+        )
         logger.info("AUTO_SEND disabled - skipping SMS to %s", ",".join(to))
-        return {"status_code": 202, "body": {"skipped": True, "reason": "auto_send_disabled", "to": to}}
+        return response
     if mode == "premium":
         if not settings.sms_shortcode or not settings.sms_keyword:
             raise RuntimeError("Premium SMS requires AFRICASTALKING_SHORTCODE and AFRICASTALKING_KEYWORD")
-        return post_form(
+        response = post_form(
             f"{AT_CONTENT_BASE_URL}/messaging",
             {
                 "username": settings.africastalking_username,
@@ -293,6 +499,15 @@ def send_sms(to: list[str], message: str, mode: Literal["bulk", "premium"] = "bu
                 "keyword": settings.sms_keyword,
             },
         )
+        log_event(
+            "sms_sent",
+            "sms",
+            "system",
+            ",".join(to),
+            {"to": to, "message": message, "mode": mode, "response": response},
+            "sent" if 200 <= response["status_code"] < 300 else "failed",
+        )
+        return response
     if settings.africastalking_environment == "sandbox":
         data: dict[str, Any] = {
             "username": settings.africastalking_username,
@@ -303,6 +518,14 @@ def send_sms(to: list[str], message: str, mode: Literal["bulk", "premium"] = "bu
         if settings.sender_id:
             data["from"] = settings.sender_id
         response = post_form(settings.messaging_url, data)
+        log_event(
+            "sms_sent",
+            "sms",
+            "system",
+            ",".join(to),
+            {"to": to, "message": message, "mode": mode, "response": response},
+            "sent" if 200 <= response["status_code"] < 300 else "failed",
+        )
         logger.info("Sandbox SMS send to %s returned %s", ",".join(to), response["status_code"])
         return response
     data = {
@@ -315,6 +538,14 @@ def send_sms(to: list[str], message: str, mode: Literal["bulk", "premium"] = "bu
     if settings.sms_sender_id:
         data["senderId"] = settings.sms_sender_id
     response = post_form(f"{AT_API_BASE_URL}/messaging/bulk", data)
+    log_event(
+        "sms_sent",
+        "sms",
+        "system",
+        ",".join(to),
+        {"to": to, "message": message, "mode": mode, "response": response},
+        "sent" if 200 <= response["status_code"] < 300 else "failed",
+    )
     logger.info("Production SMS send to %s returned %s", ",".join(to), response["status_code"])
     return response
 
@@ -354,8 +585,10 @@ def deliver_alert(alert_id: int) -> dict[str, Any]:
 
 
 def normalize_phone_number(phone_number: str) -> str:
-    phone_number = phone_number.strip()
-    return phone_number if phone_number.startswith("+") else f"+{phone_number}"
+    sanitized = re.sub(r"[^\d+]", "", phone_number or "")
+    if not sanitized:
+        return ""
+    return sanitized if sanitized.startswith("+") else f"+{sanitized}"
 
 
 def save_inbound_sms(
@@ -536,13 +769,36 @@ def create_incident(payload: IncidentCreate) -> dict[str, Any]:
 
 
 @app.patch("/api/incidents/{incident_id}")
-def update_incident(incident_id: int, payload: IncidentStatus) -> dict[str, Any]:
+def update_incident(incident_id: int, payload: IncidentUpdate) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if payload.category is not None:
+        updates["category"] = payload.category
+    if payload.description is not None:
+        updates["description"] = payload.description
+    if payload.severity is not None:
+        updates["severity"] = payload.severity
+    if payload.status is not None:
+        updates["status"] = payload.status
+    if not updates:
+        raise HTTPException(status_code=400, detail="No incident fields provided to update")
+
+    query = ", ".join(f"{key} = ?" for key in updates.keys())
+    values = list(updates.values()) + [incident_id]
     with connect() as conn:
-        conn.execute("UPDATE incidents SET status = ? WHERE id = ?", (payload.status, incident_id))
-    updated = row("SELECT * FROM incidents WHERE id = ?", (incident_id,))
-    if not updated:
+        cursor = conn.execute(f"UPDATE incidents SET {query} WHERE id = ?", tuple(values))
+    if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Incident not found")
+    updated = row("SELECT * FROM incidents WHERE id = ?", (incident_id,))
     return updated
+
+
+@app.delete("/api/incidents/{incident_id}")
+def delete_incident(incident_id: int) -> dict[str, str]:
+    with connect() as conn:
+        cursor = conn.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {"status": "deleted"}
 
 
 @app.get("/api/alerts")
@@ -655,18 +911,21 @@ def daily_briefings() -> dict[str, Any]:
     }
 
 def normalize_phone(phone: str) -> str:
-    phone = phone.strip()
+    sanitized = re.sub(r"[^\d+]", "", phone or "")
 
-    if phone.startswith("+"):
-        return phone
+    if sanitized.startswith("+"):
+        return sanitized
 
-    if phone.startswith("0"):
-        return "+254" + phone[1:]
+    if sanitized.startswith("0"):
+        return "+254" + sanitized[1:]
 
-    if phone.startswith("254"):
-        return "+" + phone
+    if sanitized.startswith("254"):
+        return "+" + sanitized
 
-    return phone
+    if sanitized.startswith("7") or sanitized.startswith("1"):
+        return "+254" + sanitized
+
+    return "+" + sanitized
 
 @app.post("/ussd", response_class=PlainTextResponse)
 def ussd(
@@ -679,7 +938,9 @@ def ussd(
     del sessionId, serviceCode
 
     # Normalize phone
-    phoneNumber = normalize_phone(phoneNumber)
+    normalized_phone = normalize_phone(phoneNumber)
+    logger.debug("USSD request raw_phone=%s normalized_phone=%s", phoneNumber, normalized_phone)
+    phoneNumber = normalized_phone
 
     # Get worker
     worker = row(

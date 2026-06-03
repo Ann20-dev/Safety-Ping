@@ -26,7 +26,10 @@
           <p class="eyebrow">Supervisor console</p>
           <h2>Missed check-ins, incident reports, and daily briefings in one place.</h2>
         </div>
-        <button id="scanBtn" type="button">Scan missed check-ins</button>
+        <div>
+          <button id="scanBtn" type="button">Scan missed check-ins</button>
+          <p id="scanStatus" class="method-label" aria-live="polite"></p>
+        </div>
       </section>
 
       <section class="metrics" aria-label="Safety metrics">
@@ -63,6 +66,7 @@
                   <th>Shift</th>
                   <th>Status</th>
                   <th>Last check-in</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody id="workerRows"></tbody>

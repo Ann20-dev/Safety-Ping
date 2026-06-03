@@ -53,15 +53,20 @@ function renderMetrics() {
 function renderWorkers() {
   document.querySelector("#workerRows").innerHTML = state.workers
     .map(
-      (worker) => `
+      (worker) => {
+        const action = worker.status === "checked_in" ? "check_out" : "check_in";
+        const label = worker.status === "checked_in" ? "Check out" : "Check in";
+        return `
         <tr>
           <td><strong>${worker.name}</strong><br>${worker.phone}</td>
           <td>${worker.site}</td>
           <td>${worker.shift_start}-${worker.shift_end}</td>
           <td>${badge(worker.status)}</td>
           <td>${fmt(worker.last_check_in)}</td>
+          <td><button class="action-btn worker-action-btn" type="button" data-phone="${worker.phone}" data-action="${action}">${label}</button></td>
         </tr>
-      `,
+      `;
+      },
     )
     .join("");
 }
@@ -75,6 +80,11 @@ function renderIncidents() {
             <strong>${incident.category} ${badge(incident.severity)}</strong>
             <p>${incident.description}</p>
             <p>${incident.worker_name || incident.worker_phone} at ${incident.site} - ${fmt(incident.created_at)}</p>
+            <div class="item-actions">
+              ${incident.status !== "Resolved" ? `<button class="action-btn incident-resolve-btn" type="button" data-incident-id="${incident.id}">Resolve</button>` : `<span class="badge resolved">Resolved</span>`}
+              <button class="action-btn incident-edit-btn" type="button" data-incident-id="${incident.id}">Edit</button>
+              <button class="action-btn danger-btn incident-delete-btn" type="button" data-incident-id="${incident.id}">Delete</button>
+            </div>
           </article>
         `,
       )
@@ -136,10 +146,30 @@ function fillWorkerSelects() {
   document.querySelector("#ussdPhone").innerHTML = options;
 }
 
-document.querySelector("#scanBtn").addEventListener("click", async () => {
-  await api("/api/missed-checkins/scan", { method: "POST" });
-  await loadAll();
-});
+const scanStatus = document.querySelector("#scanStatus");
+const scanBtn = document.querySelector("#scanBtn");
+
+async function scanMissedCheckins() {
+  scanBtn.disabled = true;
+  scanBtn.textContent = "Scanning...";
+  scanStatus.textContent = "Looking for missed worker check-ins...";
+  try {
+    const result = await api("/api/missed-checkins/scan", { method: "POST" });
+    await loadAll();
+    if (result.created_alerts > 0) {
+      scanStatus.textContent = `${result.created_alerts} missed check-in alert${result.created_alerts === 1 ? "" : "s"} created.`;
+    } else {
+      scanStatus.textContent = "No new missed check-ins found.";
+    }
+  } catch (error) {
+    scanStatus.textContent = `Scan failed: ${error.message}`;
+  } finally {
+    scanBtn.disabled = false;
+    scanBtn.textContent = "Scan missed check-ins";
+  }
+}
+
+document.querySelector("#scanBtn").addEventListener("click", scanMissedCheckins);
 
 document.querySelector("#checkInFirst").addEventListener("click", async () => {
   if (!state.workers[0]) return;
@@ -176,6 +206,74 @@ document.querySelector("#ussd").addEventListener("submit", async (event) => {
   });
   document.querySelector("#ussdOutput").textContent = await response.text();
   await loadAll();
+});
+
+document.querySelector("#workerRows").addEventListener("click", async (event) => {
+  const button = event.target.closest("button.worker-action-btn");
+  if (!button) return;
+  button.disabled = true;
+  await api("/api/checkins", {
+    method: "POST",
+    body: JSON.stringify({ worker_phone: button.dataset.phone, action: button.dataset.action }),
+  });
+  await loadAll();
+});
+
+document.querySelector("#incidentList").addEventListener("click", async (event) => {
+  const resolveButton = event.target.closest("button.incident-resolve-btn");
+  const editButton = event.target.closest("button.incident-edit-btn");
+  const deleteButton = event.target.closest("button.incident-delete-btn");
+
+  if (resolveButton) {
+    resolveButton.disabled = true;
+    await api(`/api/incidents/${resolveButton.dataset.incidentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "Resolved" }),
+    });
+    await loadAll();
+    return;
+  }
+
+  if (editButton) {
+    const incidentId = editButton.dataset.incidentId;
+    const incident = state.incidents.find((item) => String(item.id) === incidentId);
+    if (!incident) return;
+
+    const description = prompt("Edit incident description", incident.description);
+    if (description === null) return;
+    const trimmedDescription = description.trim();
+    if (!trimmedDescription) {
+      alert("Description cannot be empty.");
+      return;
+    }
+
+    const updates = { description: trimmedDescription };
+    const category = prompt("Edit category", incident.category);
+    if (category !== null && category.trim()) {
+      updates.category = category.trim();
+    }
+    const severity = prompt("Edit severity (low, medium, high, critical)", incident.severity);
+    if (severity !== null && severity.trim()) {
+      updates.severity = severity.trim();
+    }
+
+    editButton.disabled = true;
+    await api(`/api/incidents/${incidentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(updates),
+    });
+    await loadAll();
+    return;
+  }
+
+  if (deleteButton) {
+    const incidentId = deleteButton.dataset.incidentId;
+    if (!confirm("Delete this incident report? This cannot be undone.")) return;
+    deleteButton.disabled = true;
+    await api(`/api/incidents/${incidentId}`, { method: "DELETE" });
+    await loadAll();
+    return;
+  }
 });
 
 loadAll().catch((error) => {
