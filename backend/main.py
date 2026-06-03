@@ -75,7 +75,7 @@ class Settings(BaseModel):
     )
     at_messaging_url: str | None = os.getenv("AT_MESSAGING_URL")
     sms_sender_id: str | None = getenv_any("AFRICASTALKING_SENDER_ID", "SMS_SENDER_ID")
-    sms_shortcode: str | None = getenv_any("AFRICASTALKING_SHORTCODE", "SMS_SHORTCODE", default="79064")
+    sms_shortcode: str | None = getenv_any("AFRICASTALKING_SHORTCODE", "SMS_SHORTCODE", default="70896")
     sms_keyword: str | None = os.getenv("AFRICASTALKING_KEYWORD")
     sms_auto_send: bool = os.getenv("SAFETYPING_SMS_AUTO_SEND", "true").lower() == "true"
     sms_dry_run: bool = os.getenv("SAFETYPING_SMS_DRY_RUN", "false").lower() == "true"
@@ -652,6 +652,19 @@ def daily_briefings() -> dict[str, Any]:
         "briefings": BRIEFINGS,
     }
 
+def normalize_phone(phone: str) -> str:
+    phone = phone.strip()
+
+    if phone.startswith("+"):
+        return phone
+
+    if phone.startswith("0"):
+        return "+254" + phone[1:]
+
+    if phone.startswith("254"):
+        return "+" + phone
+
+    return phone
 
 @app.post("/ussd", response_class=PlainTextResponse)
 def ussd(
@@ -660,52 +673,125 @@ def ussd(
     phoneNumber: str = Form("+254700111001"),
     text: str = Form(""),
 ) -> str:
+
     del sessionId, serviceCode
-    worker = row("SELECT * FROM workers WHERE phone = ?", (phoneNumber,))
+
+    # Normalize phone
+    phoneNumber = normalize_phone(phoneNumber)
+
+    # Get worker
+    worker = row(
+        "SELECT * FROM workers WHERE phone = ?",
+        (phoneNumber,)
+    )
+
     if not worker:
         return "END You are not registered for SafetyPing. Please contact your site supervisor."
 
-    parts = [part for part in text.split("*") if part]
+    # Parse USSD input
+    parts = [p for p in text.split("*") if p]
+
+    # =====================
+    # MAIN MENU
+    # =====================
     if not parts:
         return (
             "CON SafetyPing\n"
             "1. Check in\n"
             "2. Report incident\n"
             "3. Daily briefing\n"
-            "4. Check out"
+            "4. Check out\n"
+            "5. Emergency SOS"
         )
 
+    # =====================
+    # CHECK IN
+    # =====================
     if parts[0] == "1":
         record_checkin(CheckInCreate(worker_phone=phoneNumber, action="check_in"))
         return f"END Thanks {worker['name']}. Your check-in has been recorded."
 
+    # =====================
+    # CHECK OUT
+    # =====================
     if parts[0] == "4":
         record_checkin(CheckInCreate(worker_phone=phoneNumber, action="check_out"))
         return f"END Thanks {worker['name']}. Your check-out has been recorded."
 
+    # =====================
+    # BRIEFING
+    # =====================
     if parts[0] == "3":
         return f"END {BRIEFINGS.get(worker['language'], BRIEFINGS['en'])}"
 
-    if parts[0] == "2" and len(parts) == 1:
-        return "CON Incident type\n1. Injury\n2. Near miss\n3. Unsafe equipment\n4. Harassment\n5. Other"
+    # =====================
+    # INCIDENT FLOW
+    # =====================
+    if parts[0] == "2":
 
-    if parts[0] == "2" and len(parts) == 2:
-        return "CON Severity\n1. Low\n2. Medium\n3. High\n4. Critical"
-
-    if parts[0] == "2" and len(parts) == 3:
-        return "CON Briefly describe what happened"
-
-    if parts[0] == "2" and len(parts) >= 4:
-        categories = {"1": "Injury", "2": "Near miss", "3": "Unsafe equipment", "4": "Harassment", "5": "Other"}
-        severities = {"1": "low", "2": "medium", "3": "high", "4": "critical"}
-        create_incident(
-            IncidentCreate(
-                worker_phone=phoneNumber,
-                category=categories.get(parts[1], "Other"),
-                severity=severities.get(parts[2], "medium"),
-                description=" ".join(parts[3:])[:240],
+        if len(parts) == 1:
+            return (
+                "CON Incident type\n"
+                "1. Injury\n"
+                "2. Near miss\n"
+                "3. Unsafe equipment\n"
+                "4. Harassment\n"
+                "5. Other"
             )
+
+        if len(parts) == 2:
+            return "CON Severity\n1. Low\n2. Medium\n3. High\n4. Critical"
+
+        if len(parts) == 3:
+            return "CON Briefly describe what happened"
+
+        if len(parts) >= 4:
+            categories = {
+                "1": "Injury",
+                "2": "Near miss",
+                "3": "Unsafe equipment",
+                "4": "Harassment",
+                "5": "Other"
+            }
+
+            severities = {
+                "1": "low",
+                "2": "medium",
+                "3": "high",
+                "4": "critical"
+            }
+
+            create_incident(
+                IncidentCreate(
+                    worker_phone=phoneNumber,
+                    category=categories.get(parts[1], "Other"),
+                    severity=severities.get(parts[2], "medium"),
+                    description=" ".join(parts[3:])[:240],
+                )
+            )
+
+            return "END Incident received. Your supervisor has been alerted."
+
+    # =====================
+    # EMERGENCY SOS
+    # =====================
+    if parts[0] == "5":
+
+        worker = row(
+            "SELECT * FROM workers WHERE phone = ?",
+            (phoneNumber,)
         )
-        return "END Incident received. Your supervisor has been alerted."
+
+        if not worker:
+            return "END Worker not registered."
+
+        queue_alert(
+            worker_phone=phoneNumber,
+            supervisor_phone=worker["supervisor_phone"],
+            kind="emergency",
+            message=f"EMERGENCY ALERT: {worker['name']} at {worker['site']} requires immediate assistance!"
+        )
+
+        return "END Emergency alert sent. Help is on the way."
 
     return "END Invalid option. Please try again."
