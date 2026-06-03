@@ -654,6 +654,19 @@ def daily_briefings() -> dict[str, Any]:
         "briefings": BRIEFINGS,
     }
 
+def normalize_phone(phone: str) -> str:
+    phone = phone.strip()
+
+    if phone.startswith("+"):
+        return phone
+
+    if phone.startswith("0"):
+        return "+254" + phone[1:]
+
+    if phone.startswith("254"):
+        return "+" + phone
+
+    return phone
 
 @app.post("/ussd", response_class=PlainTextResponse)
 def ussd(
@@ -662,8 +675,18 @@ def ussd(
     phoneNumber: str = Form("+254700111001"),
     text: str = Form(""),
 ) -> str:
+
     del sessionId, serviceCode
-    worker = row("SELECT * FROM workers WHERE phone = ?", (phoneNumber,))
+
+    # Normalize phone
+    phoneNumber = normalize_phone(phoneNumber)
+
+    # Get worker
+    worker = row(
+        "SELECT * FROM workers WHERE phone = ?",
+        (phoneNumber,)
+    )
+
     if not worker:
         return "END You are not registered for SafetyPing. Please contact your site supervisor."
 
@@ -681,5 +704,11 @@ def ussd(
                 severity=severity,
                 description=description,
             )
+        ),
+        emergency_alert=lambda: queue_alert(
+            worker_phone=phoneNumber,
+            supervisor_phone=worker["supervisor_phone"],
+            kind="emergency",
+            message=f"EMERGENCY ALERT: {worker['name']} at {worker['site']} requires immediate assistance!",
         ),
     )
